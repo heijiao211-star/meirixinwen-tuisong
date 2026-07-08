@@ -149,6 +149,14 @@ def ai_summarize(items: list[dict], section_key: str) -> dict[str, str]:
         print(f"[WARN] {section_key}: AI 未配置，跳过 AI 摘要")
         return {}
 
+    prompt = (
+        "你是中国技术新闻编辑，请为下面每个条目写一句中文简介。"
+        "严格要求：1.纯中文，不出现英文句子；"
+        "2.每条 30-50 个汉字；3.说清楚它是什么、为什么值得关注；"
+        "4.自然地道，不要‘值得一看’这种套话；"
+        "5.输出严格 JSON，键是条目标题（原样保留），值是中文简介。"
+    )
+
     summaries: dict[str, str] = {}
     batch_size = 10
     for i in range(0, len(items), batch_size):
@@ -157,61 +165,56 @@ def ai_summarize(items: list[dict], section_key: str) -> dict[str, str]:
             {"title": it["title"], "summary": it.get("summary", "")[:400], "source": it.get("source", "")}
             for it in batch
         ]
-        prompt = (
-            "你是中国技术新闻编辑，请为下面每个条目写一句中文简介。"
-            "严格要求：1.纯中文，不出现英文句子；"
-            "2.每条 30-50 个汉字；3.说清楚它是什么、为什么值得关注；"
-            "4.自然地道，不要‘值得一看’这种套话；"
-            "5.输出严格 JSON，键是条目标题（原样保留），值是中文简介。"
-        )
-        try:
-            payload_json = json.dumps(
-                {
-                    "model": AI_MODEL,
-                    "messages": [
-                        {"role": "system", "content": "你是中文技术新闻编辑，只输出纯中文 JSON。"},
-                        {"role": "user", "content": f"{prompt}\n\n{json.dumps(payload, ensure_ascii=False)}"},
-                    ],
-                    "temperature": 0.4,
-                    "max_tokens": 2000,
-                },
-                ensure_ascii=False,
-            )
-            req = urllib.request.Request(
-                f"{AI_BASE_URL}/chat/completions",
-                data=payload_json.encode("utf-8"),
-                headers={
-                    "Authorization": f"Bearer {AI_API_KEY}",
-                    "Content-Type": "application/json; charset=utf-8",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=120) as r:
-                resp = json.loads(r.read().decode("utf-8", errors="ignore"))
-            content = resp["choices"][0]["message"]["content"]
-            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.S)
-            # 有时模型输出不完整，尝试补全未闭合的 JSON
+        parsed_count = 0
+        for attempt in range(2):
             try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError:
-                if not content.strip().endswith("}"):
-                    content = content.rstrip().rstrip(",") + "}"
+                payload_json = json.dumps(
+                    {
+                        "model": AI_MODEL,
+                        "messages": [
+                            {"role": "system", "content": "你是中文技术新闻编辑，只输出纯中文 JSON。"},
+                            {"role": "user", "content": f"{prompt}\n\n{json.dumps(payload, ensure_ascii=False)}"},
+                        ],
+                        "temperature": 0.4,
+                        "max_tokens": 2500,
+                    },
+                    ensure_ascii=False,
+                )
+                req = urllib.request.Request(
+                    f"{AI_BASE_URL}/chat/completions",
+                    data=payload_json.encode("utf-8"),
+                    headers={
+                        "Authorization": f"Bearer {AI_API_KEY}",
+                        "Content-Type": "application/json; charset=utf-8",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    resp = json.loads(r.read().decode("utf-8", errors="ignore"))
+                content = resp["choices"][0]["message"]["content"]
+                content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.S)
                 try:
                     parsed = json.loads(content)
                 except json.JSONDecodeError:
-                    # 尝试提取每个键值对
-                    parsed = {}
-                    for m in re.finditer(r'"(.*?)"\s*:\s*"(.*?)"', content, re.S):
-                        key, value = m.group(1), m.group(2)
-                        if key and value.strip():
-                            parsed[key] = value.strip()
-            count = 0
-            for k, v in parsed.items():
-                if isinstance(v, str) and v.strip():
-                    summaries[str(k)] = v.strip()
-                    count += 1
-            print(f"[DEBUG] {section_key} batch {i//batch_size + 1}: parsed {count} summaries")
-        except Exception as exc:
-            print(f"[WARN] {section_key} batch {i//batch_size + 1} 失败：{exc}")
+                    if not content.strip().endswith("}"):
+                        content = content.rstrip().rstrip(",") + "}"
+                    try:
+                        parsed = json.loads(content)
+                    except json.JSONDecodeError:
+                        parsed = {}
+                        for m in re.finditer(r'"(.*?)"\s*:\s*"(.*?)"', content, re.S):
+                            key, value = m.group(1), m.group(2)
+                            if key and value.strip():
+                                parsed[key] = value.strip()
+                parsed_count = 0
+                for k, v in parsed.items():
+                    if isinstance(v, str) and v.strip():
+                        summaries[str(k)] = v.strip()
+                        parsed_count += 1
+                if parsed_count >= len(batch) // 2:
+                    break
+            except Exception as exc:
+                print(f"[WARN] {section_key} batch {i//batch_size + 1} attempt {attempt + 1} 失败：{exc}")
+        print(f"[DEBUG] {section_key} batch {i//batch_size + 1}: parsed {parsed_count} summaries")
     return summaries
 
 
