@@ -189,7 +189,21 @@ def ai_summarize(items: list[dict], section_key: str) -> dict[str, str]:
                 resp = json.loads(r.read().decode("utf-8", errors="ignore"))
             content = resp["choices"][0]["message"]["content"]
             content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.S)
-            parsed = json.loads(content)
+            # 有时模型输出不完整，尝试补全未闭合的 JSON
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                if not content.strip().endswith("}"):
+                    content = content.rstrip().rstrip(",") + "}"
+                try:
+                    parsed = json.loads(content)
+                except json.JSONDecodeError:
+                    # 尝试提取每个键值对
+                    parsed = {}
+                    for m in re.finditer(r'"(.*?)"\s*:\s*"(.*?)"', content, re.S):
+                        key, value = m.group(1), m.group(2)
+                        if key and value.strip():
+                            parsed[key] = value.strip()
             count = 0
             for k, v in parsed.items():
                 if isinstance(v, str) and v.strip():
@@ -285,7 +299,8 @@ def build_html(data: dict[str, list[dict]]) -> str:
 def push(title: str, content: str) -> None:
     token = os.getenv("PUSHPLUS_TOKEN", "").strip()
     if not token:
-        raise RuntimeError("缺少 PUSHPLUS_TOKEN")
+        print("[WARN] 缺少 PUSHPLUS_TOKEN，跳过推送，仅保存 HTML 报告")
+        return
     payload = {"token": token, "title": title, "content": content, "template": "html"}
     if topic := os.getenv("PUSHPLUS_TOPIC", "").strip():
         payload["topic"] = topic
